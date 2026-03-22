@@ -1,0 +1,101 @@
+// Логическая схема для tech-2026 (dating backend)
+// Импорт в https://dbdiagram.io или аналог для ER-диаграммы
+
+Table users {
+  id uuid [pk]
+  telegram_id bigint [unique, note: 'идентификатор из Telegram']
+  created_at timestamptz
+  status varchar [note: 'active, banned, deleted']
+}
+
+Table profiles {
+  id uuid [pk]
+  user_id uuid [ref: > users.id]
+  display_name varchar
+  gender varchar
+  birth_date date
+  city varchar
+  bio text
+  profile_completeness_score decimal
+  photos_count int
+  created_at timestamptz
+  updated_at timestamptz
+}
+
+Table profile_preferences {
+  id uuid [pk]
+  profile_id uuid [ref: > profiles.id]
+  preferred_gender varchar
+  age_min int
+  age_max int
+  city varchar
+  radius_km int
+}
+
+Table profile_interests {
+  id uuid [pk]
+  profile_id uuid [ref: > profiles.id]
+  tag varchar
+}
+
+Table profile_photos {
+  id uuid [pk]
+  profile_id uuid [ref: > profiles.id]
+  storage_key varchar [note: 'ключ в S3/Minio']
+  is_main boolean
+  order_index int
+  created_at timestamptz
+}
+
+Table profile_likes {
+  id uuid [pk]
+  from_profile_id uuid [ref: > profiles.id]
+  to_profile_id uuid [ref: > profiles.id]
+  is_like boolean [note: 'true лайк, false пропуск']
+  created_at timestamptz
+}
+
+Table matches {
+  id uuid [pk]
+  profile_id_1 uuid [ref: > profiles.id]
+  profile_id_2 uuid [ref: > profiles.id]
+  created_at timestamptz
+  status varchar
+}
+
+Table dialogs {
+  id uuid [pk]
+  match_id uuid [ref: > matches.id]
+  created_at timestamptz
+}
+
+Table messages {
+  id uuid [pk]
+  dialog_id uuid [ref: > dialogs.id]
+  from_profile_id uuid [ref: > profiles.id]
+  body text
+  created_at timestamptz
+  is_read boolean
+}
+
+Table profile_ratings {
+  id uuid [pk]
+  profile_id uuid [ref: > profiles.id, unique]
+  primary_rating decimal
+  behavior_rating decimal
+  combined_rating decimal
+  likes_count int
+  skips_count int
+  matches_count int
+  dialogs_after_match_count int
+  referral_score decimal
+  last_recalculated_at timestamptz
+}
+
+Table referrals {
+  id uuid [pk]
+  inviter_profile_id uuid [ref: > profiles.id]
+  invited_user_id uuid [ref: > users.id]
+  status varchar
+  created_at timestamptz
+}

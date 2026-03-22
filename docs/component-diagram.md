@@ -79,5 +79,3 @@ flowchart TB
 | HTTP REST | Синхронные запросы (регистрация, анкеты, свайпы, лента, диалоги) |
 | MQ events | Асинхронные события (`profile.liked`, `profile.skipped`, `match.created`, `dialog.started`, `message.sent`) |
 | metrics | Экспорт метрик для Prometheus |
-
-
