@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  # SQLite не требует отдельного контейнера — используется как файл
+  # Сервис с транзакциями
+  transactions:
+    build: .
+    container_name: store_transactions
+    environment:
+      - DB_PATH=/app/data/store.db
+    volumes:
+      - sqlite_data:/app/data
+    stdin_open:
+    tty:
+
+volumes:
+  sqlite_data:
+    driver: local
