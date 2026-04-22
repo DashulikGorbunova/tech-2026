@@ -33,9 +33,9 @@ for rate in (1000, 5000, 10_000, 20_000, 0):
     RATE.append(BenchmarkConfig("redis", 1024, int(rate), 15, label))
 
 EXPERIMENTS: dict[str, tuple[str, list[BenchmarkConfig]]] = {
-    "basic": ("Experiment 1 — Basic comparison (1KB, 1000/s)", BASIC),
-    "size": ("Experiment 2 — Message size impact (1000/s fixed)", SIZE),
-    "rate": ("Experiment 3 — Rate intensity (1KB fixed)", RATE),
+    "basic": ("Experiment 1 - Basic comparison (1KB, 1000/s)", BASIC),
+    "size": ("Experiment 2 - Message size impact (1000/s fixed)", SIZE),
+    "rate": ("Experiment 3 - Rate intensity (1KB fixed)", RATE),
 }
 
 
@@ -92,7 +92,7 @@ def write_json(path: str, results: list[RunResult]) -> None:
     data = [asdict(r) for r in results]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"Results JSON → {path}")
+    print(f"Results JSON -> {path}")
 
 
 def write_report_md(path: str, results: list[RunResult], title: str) -> None:
@@ -119,7 +119,7 @@ def write_report_md(path: str, results: list[RunResult], title: str) -> None:
 async def run_experiment(
     name: str,
     *,
-    settle_sec: float = 1.5,
+    settle_sec: float = 2.5,
 ) -> list[RunResult]:
     if name not in EXPERIMENTS:
         raise ValueError("unknown experiment; try: basic, size, rate, or all")
@@ -129,12 +129,12 @@ async def run_experiment(
     for i, cfg in enumerate(cfgs, start=1):
         t0 = time.time()
         label = f"[{cfg.broker.upper()}] {cfg.label}"
-        print(f"\n▶ [{i}/{len(cfgs)}] Starting: {label}", flush=True)
+        print(f"\n>> [{i}/{len(cfgs)}] Starting: {label}", flush=True)
         r = await _run_with_timeout(cfg)
         out.append(r)
         dt = time.time() - t0
         print(
-            f"✓ Done ({dt:.1f}s): {label} recv={r.received} lost={r.lost} "
+            f"OK ({dt:.1f}s): {label} recv={r.received} lost={r.lost} "
             f"act/s={r.recv_msg_per_sec} avg={r.avg_ms}ms p95={r.p95_ms}ms"
         )
         if i < len(cfgs):
@@ -153,15 +153,15 @@ async def _main_experiments(which: str) -> None:
                 await asyncio.sleep(2.0)
         print_table(all_r, "FULL SUMMARY")
         ts = _ts_filename()
-        write_json(f"results/results-{ts}.json", all_r)
         write_results_csv("results/results.csv", all_r)
         write_report_md("results/report.md", all_r, "FULL SUMMARY (basic + size + rate)")
+        write_json(f"results/results-{ts}.json", all_r)
     else:
         r = await run_experiment(which)
         ts = _ts_filename()
-        write_json(f"results/results-{which}-{ts}.json", r)
         write_results_csv("results/results.csv", r)
         write_report_md("results/report.md", r, EXPERIMENTS[which][0])
+        write_json(f"results/results-{which}-{ts}.json", r)
 
 
 def _legacy_experiment(
@@ -190,7 +190,7 @@ def _legacy_experiment(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="RabbitMQ vs Redis — same experiments as tasks/22.04-broker (TypeScript / bash runner)."
+        description="RabbitMQ vs Redis: same experiments as tasks/22.04-broker (TypeScript / bash runner)."
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 

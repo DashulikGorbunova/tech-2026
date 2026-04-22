@@ -11,7 +11,7 @@ from redis.exceptions import ResponseError
 
 from bench_common import BenchmarkConfig, RunResult, build_run_result, generate_payload, make_test_message
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 
 STREAM = "benchmark-stream"
 GROUP = "benchmark-group"
@@ -27,8 +27,6 @@ async def run_redis_benchmark(config: BenchmarkConfig) -> RunResult:
 
     producer = redis.from_url(REDIS_URL, decode_responses=True)
     consumer = redis.from_url(REDIS_URL, decode_responses=True)
-    await producer.connect()
-    await consumer.connect()
 
     await producer.delete(STREAM)
     try:

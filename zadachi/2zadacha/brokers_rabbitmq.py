@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 
 import aio_pika
@@ -10,7 +11,8 @@ from aio_pika import DeliveryMode, IncomingMessage, Message
 
 from bench_common import BenchmarkConfig, build_run_result, encode_test_message, generate_payload, make_test_message
 
-RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+# 127.0.0.1 avoids Windows resolving localhost to ::1 while port is published on IPv4 only
+RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@127.0.0.1:5672/")
 QUEUE = "benchmark"
 
 BATCH_INTERVAL_MS = 50
@@ -34,13 +36,26 @@ async def run_rabbitmq_benchmark(
     recv_errors = 0
     latencies: list[float] = []
 
-    connection = await aio_pika.connect(RABBITMQ_URL, timeout=connect_timeout_sec)
+    # After heavy load or container restart, AMQP may need a moment
+    await asyncio.sleep(1.5)
+    last_exc: Exception | None = None
+    connection = None
+    for attempt in range(90):
+        try:
+            connection = await aio_pika.connect_robust(RABBITMQ_URL, timeout=15.0)
+            break
+        except Exception as e:
+            last_exc = e
+            await asyncio.sleep(0.5)
+    if connection is None:
+        assert last_exc is not None
+        raise last_exc
     producer_ch = await connection.channel()
     consumer_ch = await connection.channel()
     default_exchange = producer_ch.default_exchange
 
-    await producer_ch.declare_queue(QUEUE, durable=False)
-    await producer_ch.purge_queue(QUEUE)
+    q_prod = await producer_ch.declare_queue(QUEUE, durable=False)
+    await q_prod.purge()
     await consumer_ch.set_qos(prefetch_count=200)
     queue = await consumer_ch.declare_queue(QUEUE, durable=False)
 
