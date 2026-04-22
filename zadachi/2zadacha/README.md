@@ -4,7 +4,7 @@
 
 ### Запуск (Windows / Linux)
 
-Поднять брокеры (образы и лимиты как в `docker-compose.yml` референса: Redis `7.2-alpine` + `maxmemory 512mb` `noeviction`, Rabbit `3.12-management`):
+Поднять брокеры (см. `docker-compose.yml`: Redis `7.2-alpine`, Rabbit `3-management`):
 
 ```bash
 docker compose -f docker-compose.yml up -d
@@ -42,9 +42,21 @@ python run_benchmark.py run --broker rabbitmq --payload-bytes 1024 --rate 1000 -
 # rate=0  →  режим MAX (как в benchmark.ts, до cap в 500 сообщений/батч)
 ```
 
-#### Скрин: контейнеры
+#### Скрин: контейнеры (устаревший пример; переснять)
 
 ![](./screens/01-docker-ps.png)
+
+**Какие скрины переснять «потом»** (после свежего `docker compose up` и `python run_benchmark.py all`), чтобы всё совпадало с текущей версией:
+
+| Файл в `screens/` | Что снять |
+|-------------------|------------|
+| `01-docker-ps.png` | Терминал: `docker ps` — видны контейнеры **`broker-rabbitmq`** и **`broker-redis`**, статус `Up` / `healthy`. |
+| `02-suite-runs.png` | Процесс прогона: консоль во время или сразу после `python run_benchmark.py all` (или `.\run-tests.ps1 all`) — видны блоки *Experiment 1/2/3* и строки `>> Starting` / `OK`. |
+| `03-results-table.png` | Сводка: кусок терминала с таблицей **FULL SUMMARY** *или* открытый `results/report.md` в IDE с итоговой таблицей. |
+| `04-summary.png` | Опционально: `results.csv` в редакторе, либо `results/results-*.json` (если отчёту нужен «сырой» JSON). |
+| `05-conclusions.png` | Секция **«Итоговые выводы»** в этом `README` в браузере/IDE (релевантно для презентации выводов). |
+
+Сохраняй **PNG** в `zadachi/2zadacha/screens/` с теми же именами, чтобы ссылки `![](./screens/...)` в README не ломались. Если снимешь только часть, достаточно обновить соответствующие файлы.
 
 ---
 
