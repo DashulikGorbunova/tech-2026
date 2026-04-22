@@ -1,31 +1,38 @@
+# Aligned with tasks/22.04-broker/docker-compose.yml (classmate reference)
+version: "3.9"
+
 services:
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.12-management
+    container_name: broker-rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
-    # одинаковые лимиты ресурсов для сравнения
-    cpus: 1.0
-    mem_limit: 512m
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    mem_limit: 512m
+    cpus: "1.0"
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 5s
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.2-alpine
+    container_name: broker-redis
     ports:
       - "6379:6379"
-    # одинаковые лимиты ресурсов для сравнения
-    cpus: 1.0
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+      --save ""
     mem_limit: 512m
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    cpus: "1.0"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      timeout: 5s
-      retries: 20
+      timeout: 3s
+      retries: 5

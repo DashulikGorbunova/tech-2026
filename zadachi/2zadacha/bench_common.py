@@ -1,85 +1,122 @@
 from __future__ import annotations
 
-import base64
 import json
+import math
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 
-def now_ns() -> int:
-    return time.time_ns()
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
 
-def b64encode_bytes(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
+def generate_payload(size_bytes: int) -> str:
+    return "x" * max(1, int(size_bytes))
 
 
-def b64decode_bytes(data_b64: str) -> bytes:
-    return base64.b64decode(data_b64.encode("ascii"))
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    """Same shape as the reference (tasks/22.04-broker/src/types.ts + benchmark matrix)."""
+
+    broker: str  # "rabbitmq" | "redis"
+    message_size_bytes: int
+    target_rate_per_sec: int  # 0 = unlimited (as fast as possible, capped per batch in runner)
+    duration_seconds: float
+    label: str
 
 
-def make_payload(payload_bytes: int) -> bytes:
-    # deterministic bytes (stable size, low CPU)
-    if payload_bytes <= 0:
-        return b""
-    chunk = (b"0123456789abcdef" * ((payload_bytes // 16) + 1))[:payload_bytes]
-    return bytes(chunk)
+def make_test_message(*, payload: str) -> dict:
+    return {"id": str(uuid.uuid4()), "sentAt": now_ms(), "payload": payload}
 
 
-def make_message(payload: bytes) -> dict:
-    return {
-        "id": str(uuid.uuid4()),
-        "sent_ts_ns": now_ns(),
-        "payload_b64": b64encode_bytes(payload),
-    }
-
-
-def encode_message(msg: dict) -> bytes:
+def encode_test_message(msg: dict) -> bytes:
     return json.dumps(msg, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def decode_message(raw: bytes) -> dict:
-    return json.loads(raw.decode("utf-8"))
-
-
 def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 
 @dataclass
 class RunResult:
     broker: str
+    label: str
     payload_bytes: int
     rate: int
     duration_sec: float
+    producer_duration_sec: float
     sent: int
     received: int
     send_errors: int
     recv_errors: int
+    lost: int
     avg_ms: float
     p95_ms: float
     max_ms: float
+    # Reference-style “actual” rates use producer phase duration, not the configured duration.
     recv_msg_per_sec: float
     sent_msg_per_sec: float
-    backlog: int | None
+    backlog: int | None = None
+
+    def to_csv_row(self) -> dict:
+        d = asdict(self)
+        return d
 
 
-def percentile(values: list[float], p: float) -> float:
-    if not values:
+def build_run_result(
+    *,
+    config: BenchmarkConfig,
+    sent: int,
+    received: int,
+    send_errors: int,
+    recv_errors: int,
+    latencies_ms: list[float],
+    producer_duration_ms: float,
+    backlog: int | None = None,
+) -> RunResult:
+    sorted_lats = sorted(latencies_ms)
+    avg = sum(sorted_lats) / len(sorted_lats) if sorted_lats else 0.0
+    p95 = _percentile_nearest(sorted_lats, 95.0) if sorted_lats else 0.0
+    max_ms = float(sorted_lats[-1]) if sorted_lats else 0.0
+    pds = max(1e-6, producer_duration_ms / 1000.0)
+    lost = max(0, int(sent - received))
+    return RunResult(
+        broker=config.broker,
+        label=config.label,
+        payload_bytes=config.message_size_bytes,
+        rate=int(config.target_rate_per_sec),
+        duration_sec=float(config.duration_seconds),
+        producer_duration_sec=producer_duration_ms / 1000.0,
+        sent=sent,
+        received=received,
+        send_errors=send_errors,
+        recv_errors=recv_errors,
+        lost=lost,
+        avg_ms=round(avg, 1),
+        p95_ms=round(p95, 1),
+        max_ms=round(max_ms, 1),
+        recv_msg_per_sec=round(received / pds, 1),
+        sent_msg_per_sec=round(sent / pds, 1),
+        backlog=backlog,
+    )
+
+
+def _percentile_nearest(values_sorted: list[float], p: float) -> float:
+    """Match utils.ts: idx = ceil((p/100)*n) - 1, clamped."""
+    if not values_sorted:
         return 0.0
-    if p <= 0:
-        return float(min(values))
-    if p >= 100:
-        return float(max(values))
-    values_sorted = sorted(values)
-    k = (len(values_sorted) - 1) * (p / 100.0)
-    f = int(k)
-    c = min(f + 1, len(values_sorted) - 1)
-    if f == c:
-        return float(values_sorted[f])
-    d0 = values_sorted[f] * (c - k)
-    d1 = values_sorted[c] * (k - f)
-    return float(d0 + d1)
+    n = len(values_sorted)
+    idx = int(math.ceil((p / 100.0) * n) - 1)
+    idx = max(0, min(idx, n - 1))
+    return float(values_sorted[idx])
 
+
+def format_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n}B"
+    if n < 1024 * 1024:
+        return f"{(n / 1024.0):.0f}KB"
+    return f"{(n / (1024.0 * 1024.0)):.1f}MB"
