@@ -9,29 +9,18 @@ import redis.asyncio as redis
 @dataclass
 class RedisConfig:
     url: str = "redis://localhost:6379/0"
-    stream: str = "bench_stream"
-    group: str = "bench_group"
-    consumer: str = "c1"
+    queue: str = "bench_list"
 
 
 async def redis_setup(cfg: RedisConfig) -> None:
-    r = redis.from_url(cfg.url, decode_responses=False)
-    try:
-        # create group (mkstream)
-        try:
-            await r.xgroup_create(name=cfg.stream, groupname=cfg.group, id="$", mkstream=True)
-        except Exception as e:
-            # BUSYGROUP is fine
-            if "BUSYGROUP" not in str(e):
-                raise
-    finally:
-        await r.aclose()
+    # no-op for list-based queue
+    return None
 
 
 async def redis_purge(cfg: RedisConfig) -> None:
     r = redis.from_url(cfg.url, decode_responses=False)
     try:
-        await r.delete(cfg.stream)
+        await r.delete(cfg.queue)
     finally:
         await r.aclose()
 
@@ -39,16 +28,7 @@ async def redis_purge(cfg: RedisConfig) -> None:
 async def redis_backlog(cfg: RedisConfig) -> int | None:
     r = redis.from_url(cfg.url, decode_responses=False)
     try:
-        info = await r.xinfo_stream(cfg.stream)
-        # redis-py may return bytes or str keys depending on client config/version
-        length = None
-        if isinstance(info, dict):
-            length = info.get(b"length")
-            if length is None:
-                length = info.get("length")  # type: ignore[arg-type]
-        if length is None:
-            return None
-        return int(length)
+        return int(await r.llen(cfg.queue))
     except Exception:
         return None
     finally:
@@ -71,8 +51,8 @@ class RedisProducer:
     async def send(self, body: bytes) -> None:
         if self._r is None:
             raise RuntimeError("producer not started")
-        # store as field "body"
-        await self._r.xadd(self.cfg.stream, fields={b"body": body}, maxlen=None, approximate=False)
+        # queue semantics: append right, consumer pops left
+        await self._r.rpush(self.cfg.queue, body)
 
 
 class RedisConsumer:
@@ -91,31 +71,20 @@ class RedisConsumer:
     async def consume_loop(self, handler, stop_event: asyncio.Event) -> None:
         if self._r is None:
             raise RuntimeError("consumer not started")
-
-        # ensure group exists (mkstream behavior)
-        try:
-            await self._r.xgroup_create(name=self.cfg.stream, groupname=self.cfg.group, id="$", mkstream=True)
-        except Exception as e:
-            if "BUSYGROUP" not in str(e):
-                raise
-
         while not stop_event.is_set():
             try:
-                resp = await self._r.xreadgroup(
-                    groupname=self.cfg.group,
-                    consumername=self.cfg.consumer,
-                    streams={self.cfg.stream: b">"},
-                    count=200,
-                    block=1000,
-                )
-                if not resp:
+                # Redis 7+ supports LPOP with count (batch pop).
+                # This drastically reduces round-trips vs BLPOP per item.
+                batch = await self._r.lpop(self.cfg.queue, count=200)
+                if not batch:
+                    await asyncio.sleep(0.01)
                     continue
-                # resp: [(stream, [(id, {field: value}), ...])]
-                for _stream, entries in resp:
-                    for entry_id, fields in entries:
-                        body = fields.get(b"body", b"")
-                        await handler(body)
-                        await self._r.xack(self.cfg.stream, self.cfg.group, entry_id)
+                if isinstance(batch, (bytes, bytearray, memoryview)):
+                    await handler(bytes(batch))
+                    continue
+                # list[bytes]
+                for body in batch:
+                    await handler(body)
             except Exception:
                 await asyncio.sleep(0.05)
 

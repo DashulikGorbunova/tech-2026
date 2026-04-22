@@ -120,7 +120,8 @@ async def run_one(*, broker: str, payload_bytes: int, rate: int, duration_sec: f
             recv_errors += 1
 
     stop_event = asyncio.Event()
-    drain_deadline = time.time() + min(30.0, max(5.0, duration_sec * 2))
+    # drain window: allow consumer to catch up after producer stops
+    drain_deadline = time.time() + min(60.0, max(10.0, duration_sec * 5))
 
     if broker == "rabbitmq":
         cfg = RabbitConfig()
@@ -145,9 +146,7 @@ async def run_one(*, broker: str, payload_bytes: int, rate: int, duration_sec: f
             backlog = await retry_async(lambda: rabbit_backlog(cfg))
     elif broker == "redis":
         cfg = RedisConfig()
-        await retry_async(lambda: redis_setup(cfg))
         await retry_async(lambda: redis_purge(cfg))
-        await retry_async(lambda: redis_setup(cfg))
         async with RedisProducer(cfg) as prod, RedisConsumer(cfg) as cons:
             consumer_task = asyncio.create_task(cons.consume_loop(handler, stop_event))
             sent, send_errors = await producer_loop(
