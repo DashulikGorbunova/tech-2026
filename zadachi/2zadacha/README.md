@@ -1,7 +1,5 @@
 ## Сравнение RabbitMQ и Redis (практика 2)
 
-Методика и **набор прогонов** приведены к варианту из репозитория-референса: [tasks/22.04-broker (SGulsim/tech-2026)](https://github.com/SGulsim/tech-2026/tree/main/tasks/22.04-broker) — те же **три эксперимента** (`basic` / `size` / `rate`), **батчи по 50 ms**, **Redis — Streams** (`XADD` + `XREADGROUP` + `XACK`, batch read `COUNT=200` `BLOCK=100` как в `redis-bench.ts`), **RabbitMQ** — classic queue `benchmark` + `prefetch(200)` + `ack` как в `rabbitmq.ts`. Формат сообщения: JSON `{"id","sentAt" (ms), "payload"}`.
-
 ### Запуск (Windows / Linux)
 
 Поднять брокеры (см. `docker-compose.yml`: Redis `7.2-alpine`, Rabbit `3-management`):
@@ -42,31 +40,31 @@ python run_benchmark.py run --broker rabbitmq --payload-bytes 1024 --rate 1000 -
 # rate=0  →  режим MAX (как в benchmark.ts, до cap в 500 сообщений/батч)
 ```
 
-#### Скрин: контейнеры (устаревший пример; переснять)
+### Скриншоты (`screens/`)
+
+`docker ps` — контейнеры `broker-rabbitmq` и `broker-redis`:
 
 ![](./screens/01-docker-ps.png)
 
-**Какие скрины переснять «потом»** (после свежего `docker compose up` и `python run_benchmark.py all`), чтобы всё совпадало с текущей версией:
+Прогон `python run_benchmark.py all` (фрагмент: Experiment 1, basic 1 KB @1k/s):
 
-| Файл в `screens/` | Что снять |
-|-------------------|------------|
-| `01-docker-ps.png` | Терминал: `docker ps` — видны контейнеры **`broker-rabbitmq`** и **`broker-redis`**, статус `Up` / `healthy`. |
-| `02-suite-runs.png` | Процесс прогона: консоль во время или сразу после `python run_benchmark.py all` (или `.\run-tests.ps1 all`) — видны блоки *Experiment 1/2/3* и строки `>> Starting` / `OK`. |
-| `03-results-table.png` | Сводка: кусок терминала с таблицей **FULL SUMMARY** *или* открытый `results/report.md` в IDE с итоговой таблицей. |
-| `04-summary.png` | Опционально: `results.csv` в редакторе, либо `results/results-*.json` (если отчёту нужен «сырой» JSON). |
-| `05-conclusions.png` | Секция **«Итоговые выводы»** в этом `README` в браузере/IDE (релевантно для презентации выводов). |
+![](./screens/02-suite-runs.png)
 
-Сохраняй **PNG** в `zadachi/2zadacha/screens/` с теми же именами, чтобы ссылки `![](./screens/...)` в README не ломались. Если снимешь только часть, достаточно обновить соответствующие файлы.
+Сводная таблица по повторам (legacy-матрица, `legacy-suite` + `summarize_repeats`):
+
+![](./screens/04-summary.png)
 
 ---
 
 ### Состав экспериментов (1:1 с `src/benchmark.ts`)
 
-| Команда | Содержание |
-|--------|------------|
-| `basic` | 1 KB, **1000 msg/s**, **20 s** — по одному прогону на брокер |
-| `size` | размеры **128 B, 1 KB, 10 KB, 100 KB** при **1000/s**, **15 s** (на каждый размер — Rabbit и Redis) |
-| `rate` | **1 KB**, скорости **1k, 5k, 10k, 20k, MAX(0)**, **15 s** — по два прогона (брокер × сценарий) |
+
+| Команда | Содержание                                                                                          |
+| ------- | --------------------------------------------------------------------------------------------------- |
+| `basic` | 1 KB, **1000 msg/s**, **20 s** — по одному прогону на брокер                                        |
+| `size`  | размеры **128 B, 1 KB, 10 KB, 100 KB** при **1000/s**, **15 s** (на каждый размер — Rabbit и Redis) |
+| `rate`  | **1 KB**, скорости **1k, 5k, 10k, 20k, MAX(0)**, **15 s** — по два прогона (брокер × сценарий)      |
+
 
 Пауза **~2.5 s** между сценариями, после каждой серии **~2 s**. **Grace** после остановки producer: `min(5 s, duration × 0.3)` — фиксированное окно, не «дождаться нуля в очереди».
 
@@ -85,12 +83,6 @@ python run_benchmark.py run --broker rabbitmq --payload-bytes 1024 --rate 1000 -
 - `backlog` для Rabbit — глубина очереди **после grace**; для Redis **не** заполняется (в stream сообщения остаются в логе; для честного сравнения смотрите `lost` и latency).
 - p95: как в `utils.ts` (индекс от `Math.ceil`).
 
-#### Скрин: пример вывода
-
-![](./screens/03-results-table.png)
-
----
-
 ### Сводка по повторам (опционально)
 
 Несколько прогонов: `python run_benchmark.py legacy-suite --runs 3 --out-dir results_repeats`, затем `python summarize_repeats.py --root results_repeats --out results/summary.md`.
@@ -103,11 +95,8 @@ python run_benchmark.py run --broker rabbitmq --payload-bytes 1024 --rate 1000 -
 
 Абсолютные `act/s` **сильно зависят от ПК и Docker**; на стенде автора (Windows, Python `asyncio`) писатель не выжимал целевой 1k msg/s по wall-clock, зато **во всех 20 сценариях `lost = 0`** — сравнение брокеров остаётся корректным в рамках одного запуска.
 
-- **Пропускная способность (факт. `recv_msg_per_sec`)**: на малых сообщениях **Redis (Streams)** заметно выше (например, basic 1 KB: Redis ~665/s vs Rabbit ~92/s в таблице). На **100 KB** оба упираются в пропускную способность (~25–35 act/s в этом прогоне), **Redis** при этом сильно проигрывает по **задержке** (см. `p95` и `max` в `size` для 100 KB).
+- **Пропускная способность (факт. `recv_msg_per_sec`)**: на малых сообщениях **Redis (Streams)** заметно выше (например, basic 1 KB: Redis ~~665/s vs Rabbit ~92/s в таблице). На **100 KB** оба упираются в пропускную способность (~~25–35 act/s в этом прогоне), **Redis** при этом сильно проигрывает по **задержке** (см. `p95` и `max` в `size` для 100 KB).
 - **Размер сообщения (`size`)**: рост payload с 128 B до 100 KB снижает `act/s` у обоих; у **Redis** на 10–100 KB растут **avg/p95 latency** сильнее, чем у **RabbitMQ** в этом наборе измерений.
 - **Интенсивность (`rate`, 1 KB)**: при росте целевого RPS **Redis** сохраняет существенно более высокий `act/s` (до ~1.3k при MAX); **RabbitMQ** на отдельном инстансе остаётся в вилке ~90–180 act/s — узкое место здесь сочетание клиента и брокера, а не «потеря» сообщений (`lost=0`). **Backlog** у Rabbit после grace в прогоне был **0**.
 - **Инструмент**: Python-раннер повторяет логику референса (батчи 50 ms, Streams, те же метрики); для отчёта приложены `results/` и JSON.
 
-#### Скрин: итог
-
-![](./screens/05-conclusions.png)
