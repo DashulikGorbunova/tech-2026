@@ -1,17 +1,20 @@
+# bot/rating.py
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+import logging
+from datetime import datetime
 
 from bot.storage import Profile, UserStorage, ProfileRating
+
+logger = logging.getLogger(__name__)
 
 # Веса уровня 3 (комбинированный): первичный, поведенческий, «реферал»
 W_PRIMARY = 0.45
 W_BEHAVIOR = 0.45
 W_REFERRAL = 0.1
 
-# «Реферальный» сигнал для этапа: бонус за полностью заполненную анкету
-# (документ требует пункт про приглашение друзей; пока — заявка под поле referred в будущем)
 REF_BONUS_MAX = 0.08
 
 
@@ -31,7 +34,7 @@ def _clamp01(x: float) -> float:
 
 
 def compute_primary_rating(profile: Profile) -> float:
-    """Уровень 1: данные анкеты, полнота, фото, базовые предпочтения (диапазон/пол заданы)."""
+    """Уровень 1: данные анкеты, полнота, фото, базовые предпочтения"""
     parts: list[float] = []
     # Полнота текста
     bio_len = len((profile.bio or "").strip())
@@ -41,66 +44,80 @@ def compute_primary_rating(profile: Profile) -> float:
     # Интересы
     interests_ok = 1.0 if len((profile.interests or "").strip()) >= 3 else 0.4
     parts.append(interests_ok)
-    # Предпочтения «кого ищу» заданы нетривиально
+    # Предпочтения
     pref_ok = 1.0 if profile.preferred_gender in ("male", "female", "any") else 0.5
     parts.append(pref_ok)
     if profile.age_max > profile.age_min:
         parts.append(1.0)
     else:
         parts.append(0.5)
-    # География: наличие города
+    # Город
     parts.append(1.0 if len((profile.city or "").strip()) >= 2 else 0.3)
     return _clamp01(sum(parts) / len(parts))
 
 
-def compute_behavior_rating(
-    likes_in: int,
-    skips_in: int,
-    matches_in: int,
-) -> float:
-    """Уровень 2: реакции других (лайки/пропуски) и мэтчи."""
+def compute_behavior_rating(likes_in: int, skips_in: int, matches_in: int) -> float:
+    """Уровень 2: реакции других пользователей"""
     total = likes_in + skips_in
     if total == 0:
         return 0.5
     like_ratio = likes_in / float(total)
-    # Доля мэтчей к числу входящих лайков: насколько часто взаимность
     denom = max(1, likes_in)
     match_signal = _clamp01(matches_in / float(denom))
     return _clamp01(0.55 * like_ratio + 0.45 * match_signal)
 
 
 def compute_referral_placeholder(profile: Profile) -> float:
-    """Плейсхолдер реф. сигнала (ур. 3): далее — явные рефералы в БД; сейчас — за «шаримость» профиля."""
-    base = 0.5 * _clamp01(len(profile.bio) / 500.0) + 0.5 * _clamp01(min(profile.photo_count, 4) / 4.0)
+    """Плейсхолдер реферальной системы"""
+    base = 0.5 * _clamp01(len(profile.bio or "") / 500.0) + 0.5 * _clamp01(min(profile.photo_count, 4) / 4.0)
     return _clamp01(REF_BONUS_MAX * base)
 
 
 def compute_combined_rating(primary: float, behavior: float, referral: float) -> float:
-    """Уровень 3: взвешенная модель; referral нормируется в 0..1 относительно REF_BONUS_MAX."""
+    """Уровень 3: Комбинированный рейтинг"""
     ref_01 = _clamp01(referral / REF_BONUS_MAX) if REF_BONUS_MAX > 0 else 0.0
     return _clamp01(W_PRIMARY * primary + W_BEHAVIOR * behavior + W_REFERRAL * ref_01)
 
 
 def recompute_for_profile(store: UserStorage, profile: Profile) -> Scores:
-    li, sk, mt = store.recompute_aggregates_from_db(profile.id)
-    primary = compute_primary_rating(profile)
-    behavior = compute_behavior_rating(li, sk, mt)
-    referral = compute_referral_placeholder(profile)
-    comb = compute_combined_rating(primary, behavior, referral)
-    store.upsert_rating(
-        profile.id,
-        primary,
-        behavior,
-        comb,
-        li,
-        sk,
-        mt,
-    )
-    return Scores(primary, behavior, comb)
+    """Полный пересчёт рейтинга профиля"""
+    try:
+        li, sk, mt = store.recompute_aggregates_from_db(profile.id)
+        primary = compute_primary_rating(profile)
+        behavior = compute_behavior_rating(li, sk, mt)
+        referral = compute_referral_placeholder(profile)
+        comb = compute_combined_rating(primary, behavior, referral)
+
+        store.upsert_rating(
+            profile.id,
+            primary,
+            behavior,
+            comb,
+            li,
+            sk,
+            mt,
+        )
+        logger.info(f"Rating updated for {profile.id}: primary={primary:.2f}, combined={comb:.2f}")
+        return Scores(primary, behavior, comb)
+    except Exception as e:
+        logger.error(f"Error recomputing rating for {profile.id}: {e}")
+        raise
 
 
 def ensure_rating(store: UserStorage, profile: Profile) -> ProfileRating:
+    """Создаёт/обновляет запись рейтинга"""
     recompute_for_profile(store, profile)
     row = store.get_rating_row(profile.id)
     assert row is not None
     return row
+
+
+# Для совместимости с предыдущими вызовами из main.py
+def update_rating_after_action(storage: UserStorage, user_id: int, action: str):
+    """Универсальная функция обновления после действий"""
+    try:
+        profile = storage.get_profile(user_id)
+        if profile:
+            recompute_for_profile(storage, profile)
+    except Exception as e:
+        logger.error(f"Error in update_rating_after_action for {user_id}: {e}")

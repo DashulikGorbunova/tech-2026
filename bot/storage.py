@@ -50,9 +50,10 @@ class ProfileRating:
 
 
 class UserStorage:
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
+    def __init__(self, db_path: Path | str = "data/bot.sqlite3") -> None:
+        self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        Path("data/photos").mkdir(parents=True, exist_ok=True)   # добавили папку для фото
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -647,3 +648,30 @@ class UserStorage:
         if extra:
             payload["extra"] = extra
         return json.dumps(payload, ensure_ascii=False)
+
+        def save_photo(self, telegram_id: int, file_path: str) -> bool:
+            """Сохраняет фото и увеличивает счётчик"""
+            try:
+                with self._connect() as conn:
+                    # Обновляем счётчик
+                    cur = conn.execute(
+                        "UPDATE profiles SET photo_count = photo_count + 1 WHERE user_id = ?",
+                        (telegram_id,)
+                    )
+                    conn.commit()
+                    
+                    if cur.rowcount > 0:
+                        logger.info(f"Фото добавлено пользователю {telegram_id}")
+                        return True
+                    return False
+            except Exception as e:
+                logger.error(f"save_photo error: {e}")
+                return False
+                
+        def get_all_active_profiles(self) -> list[int]:
+            """Нужен для Celery"""
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM profiles WHERE deleted_at IS NULL"
+                ).fetchall()
+            return [int(r[0]) for r in rows]
