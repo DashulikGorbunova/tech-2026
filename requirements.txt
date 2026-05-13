@@ -1,4 +1,4 @@
-cat > requirements.txt << 'EOF'
+ts.txt << 'EOF'
 python-telegram-bot==21.11.1
 redis>=5.0.0
 celery==5.4.0

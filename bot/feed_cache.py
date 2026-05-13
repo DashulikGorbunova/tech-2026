@@ -109,7 +109,37 @@ def build_ranked_ids(store: UserStorage, viewer: Profile) -> list[int]:
             scored.append((r.combined_rating + h, p.id, r.combined_rating))
     scored.sort(key=lambda t: t[0], reverse=True)
     return [i for _, i, _ in scored]
-
+    
+def build_ranked_ids(store: UserStorage, viewer: Profile, include_seen: bool = False) -> list[int]:
+    """Построение списка ID анкет с проверкой на существование фото"""
+    if include_seen:
+        exclude_ids = set()
+    else:
+        exclude_ids = store.get_already_shown_to_ids(viewer.id)
+    
+    cands = store.list_candidate_profiles(viewer, exclude_ids, limit=500)
+    scored: list[tuple[float, int, float]] = []
+    
+    for p in cands:
+        # Проверяем, есть ли фото у пользователя
+        try:
+            user_telegram_id = store._get_telegram_id_for_user(p.user_id)
+            photos_dir = Path("data/photos")
+            user_photos = list(photos_dir.glob(f"{user_telegram_id}_*.jpg"))
+            
+            # Если фото нет - это нормально, просто показываем без фото
+            # Если фото есть но битое - всё равно показываем, ошибка обработается при отправке
+        except Exception as e:
+            logger.warning(f"Ошибка при проверке фото для {p.id}: {e}")
+        
+        recompute_for_profile(store, p)
+        r = store.get_rating_row(p.id)
+        if r is not None:
+            h = (p.id % 5) * 0.001
+            scored.append((r.combined_rating + h, p.id, r.combined_rating))
+    
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [i for _, i, _ in scored]
 
 def refill_if_needed(
     store: UserStorage,

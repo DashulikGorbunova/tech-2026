@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputMediaPhoto
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -30,6 +30,7 @@ DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "bot.sqlite3"
 storage = UserStorage(DB_PATH)
 
+# Состояния для ConversationHandler
 (
     PROFILE_NAME,
     PROFILE_AGE,
@@ -66,7 +67,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if storage.save_photo(user_id, str(file_path)):
         profile = storage.get_profile_by_telegram_id(user_id)
         if profile:
-            recompute_for_profile(storage, profile)  # обновляем рейтинг
+            recompute_for_profile(storage, profile)
             await update.message.reply_text("✅ Фото успешно загружено!")
     else:
         await update.message.reply_text("❌ Ошибка при сохранении фото.")
@@ -233,7 +234,7 @@ async def pref_age_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await update.message.reply_text(
         f"✅ Анкета сохранена!\n\n"
         f"{profile.name}, {profile.age}, {profile.city}\n\n"
-        "📸 Можешь отправить фото (можно несколько).\n"
+        "📸 Можешь отправить фото.\n"
         "Когда закончишь — напиши /done"
     )
     return PROFILE_PHOTO
@@ -283,7 +284,68 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Просмотр карточек других пользователей"""
+    """Просмотр карточек других пользователей с фото"""
+    if update.message is None or update.effective_user is None:
+        return
+
+    viewer = storage.get_profile_by_telegram_id(update.effective_user.id)
+    if not viewer:
+        await update.message.reply_text("Сначала заполни анкету — /start")
+        return
+
+    # Получаем ID анкеты ДО того, как пытаемся её отправить
+    refill_if_needed(storage, viewer, min_len=1)
+    next_id = pop_next_id(viewer.id)
+
+    if next_id is None:
+        invalidate(viewer.id)
+        refill_if_needed(storage, viewer, min_len=1)
+        next_id = pop_next_id(viewer.id)
+
+    if next_id is None:
+        await update.message.reply_text("Пока нет подходящих анкет.")
+        return
+
+    p = storage.get_profile_by_id(next_id)
+    if not p:
+        await update.message.reply_text("Ошибка. Попробуй /feed ещё раз.")
+        return
+
+    r = ensure_rating(storage, p)
+
+    text = (
+        f"👤 {p.name}, {p.age}, {p.city}\n\n"
+        f"📝 {p.bio or 'Без описания'}\n\n"
+        f"⭐ Интересы: {p.interests or '—'}\n"
+        f"📊 Рейтинг: {r.combined_rating:.2f}"
+    )
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("❤️ Лайк", callback_data=f"swipe:like:{p.id}"),
+        InlineKeyboardButton("⏭ Пропустить", callback_data=f"swipe:skip:{p.id}"),
+    ]])
+
+    try:
+        user_telegram_id = storage._get_telegram_id_for_user(p.user_id)
+        photos_dir = Path("data/photos")
+        user_photos = sorted(photos_dir.glob(f"{user_telegram_id}_*.jpg"), reverse=True)
+        
+        if user_photos:
+            with open(user_photos[0], 'rb') as photo_file:
+                await update.message.reply_photo(
+                    photo=photo_file, 
+                    caption=text, 
+                    reply_markup=keyboard
+                )
+        else:
+            await update.message.reply_text(text=text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке анкеты {p.id}: {e}")
+        # Если ошибка, анкета УЖЕ удалена из очереди (pop_next_id)
+        # Просто показываем следующую
+        await update.message.reply_text("⚠️ Ошибка при загрузке анкеты, пробую следующую...")
+        await feed_command(update, context)  # Рекурсивно показываем следующую
+    """Просмотр карточек других пользователей с фото"""
     if update.message is None or update.effective_user is None:
         return
 
@@ -311,23 +373,551 @@ async def feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     r = ensure_rating(storage, p)
 
-    await update.message.reply_text(
-        f"{p.name}, {p.age}, {p.city}\n"
-        f"{p.bio or 'Без описания.'}\n"
-        f"Интересы: {p.interests or '—'}\n"
-        f"Рейтинг: {r.combined_rating:.2f}",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("❤️ Лайк", callback_data=f"swipe:like:{p.id}"),
-                InlineKeyboardButton("⏭ Пропустить", callback_data=f"swipe:skip:{p.id}"),
-            ]
-        ])
+    text = (
+        f"👤 {p.name}, {p.age}, {p.city}\n\n"
+        f"📝 {p.bio or 'Без описания'}\n\n"
+        f"⭐ Интересы: {p.interests or '—'}\n"
+        f"📊 Рейтинг: {r.combined_rating:.2f}"
     )
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("❤️ Лайк", callback_data=f"swipe:like:{p.id}"),
+        InlineKeyboardButton("⏭ Пропустить", callback_data=f"swipe:skip:{p.id}"),
+    ]])
+
+    # Получаем telegram_id пользователя для поиска его фото
+    try:
+        user_telegram_id = storage._get_telegram_id_for_user(p.user_id)
+        
+        # Ищем фото пользователя
+        photos_dir = Path("data/photos")
+        user_photos = sorted(photos_dir.glob(f"{user_telegram_id}_*.jpg"), reverse=True)
+        
+        if user_photos:
+            # Отправляем карточку с фото
+            try:
+                with open(user_photos[0], 'rb') as photo_file:
+                    await update.message.reply_photo(
+                        photo=photo_file, 
+                        caption=text, 
+                        reply_markup=keyboard
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при отправке фото: {e}")
+                await update.message.reply_text(text=text, reply_markup=keyboard)
+        else:
+            await update.message.reply_text(text=text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка при получении фото: {e}")
+        await update.message.reply_text(text=text, reply_markup=keyboard)
 
 
 async def swipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (можно оставить минимальную версию или расширить позже)
-    await update.callback_query.answer("Действие сохранено")
+    """Обработка лайков и пропусков - простая версия без редактирования"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data is None:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[0] != "swipe":
+        return
+
+    action = parts[1]
+    target_profile_id = int(parts[2])
+
+    user_id = query.from_user.id
+    viewer = storage.get_profile_by_telegram_id(user_id)
+
+    if not viewer:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Сначала заполни анкету — /start"
+        )
+        return
+
+    target = storage.get_profile_by_id(target_profile_id)
+    if not target:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Анкета больше не доступна"
+        )
+        invalidate(viewer.id)
+        return
+
+    # Удаляем исходное сообщение с анкетой (не пытаемся редактировать)
+    try:
+        await query.delete_message()
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение: {e}")
+
+    # Сохраняем взаимодействие
+    is_like = (action == "like")
+    created, mutual, match_id = storage.add_interaction(viewer.id, target.id, is_like)
+
+    if not created:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⚠️ Ты уже оценил эту анкету!",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("➡️ Следующая анкета", callback_data="next_feed")
+            ]])
+        )
+        return
+
+    # Формируем сообщение о результате
+    if action == "like":
+        if mutual:
+            await notify_match(context, viewer, target)
+            message_text = f"💘 Взаимная симпатия с {target.name}!"
+        else:
+            message_text = f"👍 Ты лайкнул(а) {target.name}!"
+    else:
+        message_text = f"👎 Ты пропустил(а) {target.name}"
+
+    # Отправляем сообщение о результате с кнопкой "дальше"
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=message_text,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("➡️ Следующая анкета", callback_data="next_feed")
+        ]])
+    )
+
+    # Отправляем событие в очередь для пересчёта рейтинга
+    event_type = "profile_liked" if action == "like" else "profile_skipped"
+    publish_interaction_event(storage, event_type, viewer.id, target.id)
+
+    # Обновляем рейтинг цели
+    recompute_for_profile(storage, target)
+
+    # Инвалидируем кэш ленты у зрителя
+    invalidate(viewer.id)
+    """Обработка лайков и пропусков"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data is None:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[0] != "swipe":
+        return
+
+    action = parts[1]
+    target_profile_id = int(parts[2])
+
+    user_id = query.from_user.id
+    viewer = storage.get_profile_by_telegram_id(user_id)
+
+    if not viewer:
+        # Проверяем тип сообщения перед редактированием
+        if query.message.text:
+            await query.edit_message_text("❌ Сначала заполни анкету — /start")
+        else:
+            await query.message.reply_text("❌ Сначала заполни анкету — /start")
+        return
+
+    target = storage.get_profile_by_id(target_profile_id)
+    if not target:
+        if query.message.text:
+            await query.edit_message_text("❌ Анкета больше не доступна")
+        else:
+            await query.message.reply_text("❌ Анкета больше не доступна")
+        invalidate(viewer.id)
+        return
+
+    # add_interaction возвращает кортеж (created, mutual_match, match_id)
+    is_like = (action == "like")
+    created, mutual, match_id = storage.add_interaction(viewer.id, target.id, is_like)
+
+    if not created:
+        # Если не создано (уже оценил), показываем сообщение и кнопку следующей анкеты
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("➡️ Следующая анкета", callback_data="next_feed")
+        ]])
+        
+        try:
+            # Пытаемся отредактировать существующее сообщение
+            if query.message.text:
+                await query.edit_message_text(
+                    "⚠️ Ты уже оценил эту анкету!",
+                    reply_markup=keyboard
+                )
+            else:
+                # Если это фото, удаляем старое и отправляем новое
+                await query.delete_message()
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="⚠️ Ты уже оценил эту анкету!",
+                    reply_markup=keyboard
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения: {e}")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="⚠️ Ты уже оценил эту анкету!",
+                reply_markup=keyboard
+            )
+        return
+
+    # Создаём клавиатуру для следующей анкеты
+    next_keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("➡️ Следующая анкета", callback_data="next_feed")
+    ]])
+
+    # Формируем сообщение в зависимости от действия
+    if action == "like":
+        if mutual:
+            await notify_match(context, viewer, target)
+            message_text = f"💘 Взаимная симпатия с {target.name}!"
+        else:
+            message_text = f"👍 Ты лайкнул(а) {target.name}!"
+    else:  # skip
+        message_text = f"👎 Ты пропустил(а) {target.name}"
+
+    # Отправляем результат, пытаясь отредактировать исходное сообщение
+    try:
+        if query.message.text:
+            await query.edit_message_text(message_text, reply_markup=next_keyboard)
+        else:
+            # Если это было фото, удаляем и отправляем текстовое сообщение
+            await query.delete_message()
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=message_text,
+                reply_markup=next_keyboard
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке результата: {e}")
+        # Если не удалось отредактировать, отправляем новое сообщение
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=message_text,
+            reply_markup=next_keyboard
+        )
+
+    # Отправляем событие в очередь для пересчёта рейтинга
+    event_type = "profile_liked" if action == "like" else "profile_skipped"
+    publish_interaction_event(storage, event_type, viewer.id, target.id)
+
+    # Обновляем рейтинг цели
+    recompute_for_profile(storage, target)
+
+    # Инвалидируем кэш ленты у зрителя
+    invalidate(viewer.id)
+    """Обработка лайков и пропусков"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data is None:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[0] != "swipe":
+        return
+
+    action = parts[1]
+    target_profile_id = int(parts[2])
+
+    user_id = query.from_user.id
+    viewer = storage.get_profile_by_telegram_id(user_id)
+
+    if not viewer:
+        await query.edit_message_text("❌ Сначала заполни анкету — /start")
+        return
+
+    target = storage.get_profile_by_id(target_profile_id)
+    if not target:
+        await query.edit_message_text("❌ Анкета больше не доступна")
+        invalidate(viewer.id)
+        return
+
+    is_like = (action == "like")
+    created, mutual, match_id = storage.add_interaction(viewer.id, target.id, is_like)
+
+    if not created:
+        await query.edit_message_text("⚠️ Ты уже оценил эту анкету!")
+        return
+
+    if action == "like":
+        if mutual:
+            await notify_match(context, viewer, target)
+            await query.edit_message_text(
+                f"💘 Взаимная симпатия с {target.name}!",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("➡️ Следующая анкета", callback_data="next_feed")
+                ]])
+            )
+        else:
+            await query.edit_message_text(
+                f"👍 Ты лайкнул(а) {target.name}!",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("➡️ Следующая анкета", callback_data="next_feed")
+                ]])
+            )
+    else:
+        await query.edit_message_text(
+            f"👎 Ты пропустил(а) {target.name}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("➡️ Следующая анкета", callback_data="next_feed")
+            ]])
+        )
+
+    event_type = "profile_liked" if action == "like" else "profile_skipped"
+    publish_interaction_event(storage, event_type, viewer.id, target.id)
+    recompute_for_profile(storage, target)
+    invalidate(viewer.id)
+
+
+async def next_feed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать следующую анкету"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    viewer = storage.get_profile_by_telegram_id(user_id)
+
+    if not viewer:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Сначала заполни анкету — /start"
+        )
+        return
+
+    # Удаляем сообщение с кнопкой "дальше"
+    try:
+        await query.delete_message()
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение: {e}")
+
+    # Получаем следующую анкету
+    refill_if_needed(storage, viewer, min_len=1)
+    next_id = pop_next_id(viewer.id)
+
+    if next_id is None:
+        invalidate(viewer.id)
+        refill_if_needed(storage, viewer, min_len=1)
+        next_id = pop_next_id(viewer.id)
+
+    if next_id is None:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="📭 Пока нет подходящих анкет. Зайди позже!"
+        )
+        return
+
+    target = storage.get_profile_by_id(next_id)
+    if not target:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Ошибка. Попробуй /feed ещё раз"
+        )
+        return
+
+    r = ensure_rating(storage, target)
+
+    text = (
+        f"👤 {target.name}, {target.age}, {target.city}\n\n"
+        f"📝 {target.bio or 'Без описания'}\n\n"
+        f"⭐ Интересы: {target.interests or '—'}\n"
+        f"📊 Рейтинг: {r.combined_rating:.2f}"
+    )
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("❤️ Лайк", callback_data=f"swipe:like:{target.id}"),
+        InlineKeyboardButton("⏭ Пропустить", callback_data=f"swipe:skip:{target.id}"),
+    ]])
+
+    try:
+        user_telegram_id = storage._get_telegram_id_for_user(target.user_id)
+        photos_dir = Path("data/photos")
+        user_photos = sorted(photos_dir.glob(f"{user_telegram_id}_*.jpg"), reverse=True)
+        
+        if user_photos:
+            with open(user_photos[0], 'rb') as photo_file:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo_file,
+                    caption=text,
+                    reply_markup=keyboard
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке анкеты {target.id}: {e}")
+        # Пробуем следующую
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⚠️ Ошибка при загрузке анкеты, пробую следующую..."
+        )
+        await next_feed_callback(update, context)
+    """Показать следующую анкету после лайка/скипа с фото"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    viewer = storage.get_profile_by_telegram_id(user_id)
+
+    if not viewer:
+        await query.message.reply_text("❌ Сначала заполни анкету — /start")
+        return
+
+    # Удаляем старое сообщение
+    try:
+        await query.delete_message()
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение: {e}")
+
+    # Получаем следующую анкету
+    refill_if_needed(storage, viewer, min_len=1)
+    next_id = pop_next_id(viewer.id)
+
+    if next_id is None:
+        invalidate(viewer.id)
+        refill_if_needed(storage, viewer, min_len=1)
+        next_id = pop_next_id(viewer.id)
+
+    if next_id is None:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="📭 Пока нет подходящих анкет. Зайди позже!"
+        )
+        return
+
+    target = storage.get_profile_by_id(next_id)
+    if not target:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Ошибка. Попробуй /feed ещё раз"
+        )
+        return
+
+    r = ensure_rating(storage, target)
+
+    text = (
+        f"👤 {target.name}, {target.age}, {target.city}\n\n"
+        f"📝 {target.bio or 'Без описания'}\n\n"
+        f"⭐ Интересы: {target.interests or '—'}\n"
+        f"📊 Рейтинг: {r.combined_rating:.2f}"
+    )
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("❤️ Лайк", callback_data=f"swipe:like:{target.id}"),
+        InlineKeyboardButton("⏭ Пропустить", callback_data=f"swipe:skip:{target.id}"),
+    ]])
+
+    try:
+        user_telegram_id = storage._get_telegram_id_for_user(target.user_id)
+        photos_dir = Path("data/photos")
+        user_photos = sorted(photos_dir.glob(f"{user_telegram_id}_*.jpg"), reverse=True)
+        
+        if user_photos:
+            with open(user_photos[0], 'rb') as photo_file:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo_file,
+                    caption=text,
+                    reply_markup=keyboard
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке следующей анкеты {target.id}: {e}")
+        # Рекурсивно показываем следующую (текущая уже удалена из очереди)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⚠️ Ошибка при загрузке анкеты, пробую следующую..."
+        )
+        await next_feed_callback(update, context)
+
+async def notify_match(context: ContextTypes.DEFAULT_TYPE, viewer, target):
+    """Отправить уведомление о взаимной симпатии"""
+    viewer_telegram_id = storage._get_telegram_id_for_user(viewer.user_id)
+    target_telegram_id = storage._get_telegram_id_for_user(target.user_id)
+    
+    try:
+        await context.bot.send_message(
+            chat_id=viewer_telegram_id,
+            text=f"💘 Взаимная симпатия с {target.name}! Теперь вы можете общаться."
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить {viewer_telegram_id}: {e}")
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_telegram_id,
+            text=f"💘 Взаимная симпатия с {viewer.name}! Теперь вы можете общаться."
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить {target_telegram_id}: {e}")
+
+
+async def refresh_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистить кэш и показать новую ленту"""
+    if update.message is None or update.effective_user is None:
+        return
+
+    viewer = storage.get_profile_by_telegram_id(update.effective_user.id)
+    if not viewer:
+        await update.message.reply_text("❌ Сначала заполни анкету — /start")
+        return
+
+    invalidate(viewer.id)
+    await update.message.reply_text("🔄 Лента обновлена! Начинаю показ с начала.")
+    await feed_command(update, context)
+
+async def reset_feed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать все анкеты заново (включая уже оценённые)"""
+    if update.message is None or update.effective_user is None:
+        return
+
+    viewer = storage.get_profile_by_telegram_id(update.effective_user.id)
+    if not viewer:
+        await update.message.reply_text("❌ Сначала заполни анкету — /start")
+        return
+
+    # Очищаем кэш
+    invalidate(viewer.id)
+    
+    # Получаем ID всех анкет, которые подходят по фильтрам
+    all_candidates = storage.list_candidate_profiles(viewer, set(), limit=500)
+    
+    if not all_candidates:
+        await update.message.reply_text("📭 Нет доступных анкет.")
+        return
+    
+    # Сортируем по рейтингу
+    scored = []
+    for p in all_candidates:
+        r = ensure_rating(storage, p)
+        scored.append((r.combined_rating, p.id))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    
+    # Создаём новую очередь вручную (минуя проверку на просмотренные)
+    from bot.feed_cache import _get_backend, _key_for
+    backend, _ = _get_backend()
+    k = _key_for(viewer.id)
+    backend.delete(k)
+    
+    # Добавляем все анкеты в обратном порядке
+    for pid in reversed([sid for _, sid in scored]):
+        backend.lpush(k, str(pid))
+    
+    await update.message.reply_text(
+        f"✅ Лента полностью обновлена! Добавлено {len(scored)} анкет.\n"
+        "Теперь будут показываться ВСЕ анкеты, даже те, которые ты уже видел.\n\n"
+        "Используй /feed для просмотра."
+    )
 
 
 def main() -> None:
@@ -362,10 +952,15 @@ def main() -> None:
     application.add_handler(CommandHandler("profile", profile_command))
     application.add_handler(CommandHandler("feed", feed_command))
     application.add_handler(CommandHandler("done", done_profile))
+    application.add_handler(CommandHandler("refresh", refresh_feed_command))
+    application.add_handler(CommandHandler("new", refresh_feed_command))
+    application.add_handler(CommandHandler("reset_feed", reset_feed_command))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
     application.add_handler(CallbackQueryHandler(swipe_callback, pattern=r"^swipe:"))
+    application.add_handler(CallbackQueryHandler(next_feed_callback, pattern=r"^next_feed$"))
 
-    logger.info("✅ Bot запущен — /feed работает, фото загружаются и влияют на рейтинг")
+    logger.info("✅ Бот запущен — /feed работает, кнопки лайк/скип работают, /refresh работает!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class User:
@@ -53,7 +55,7 @@ class UserStorage:
     def __init__(self, db_path: Path | str = "data/bot.sqlite3") -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        Path("data/photos").mkdir(parents=True, exist_ok=True)   # добавили папку для фото
+        Path("data/photos").mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -649,29 +651,41 @@ class UserStorage:
             payload["extra"] = extra
         return json.dumps(payload, ensure_ascii=False)
 
-        def save_photo(self, telegram_id: int, file_path: str) -> bool:
-            """Сохраняет фото и увеличивает счётчик"""
-            try:
-                with self._connect() as conn:
-                    # Обновляем счётчик
-                    cur = conn.execute(
-                        "UPDATE profiles SET photo_count = photo_count + 1 WHERE user_id = ?",
-                        (telegram_id,)
-                    )
-                    conn.commit()
-                    
-                    if cur.rowcount > 0:
-                        logger.info(f"Фото добавлено пользователю {telegram_id}")
-                        return True
-                    return False
-            except Exception as e:
-                logger.error(f"save_photo error: {e}")
-                return False
-                
-        def get_all_active_profiles(self) -> list[int]:
-            """Нужен для Celery"""
+    def save_photo(self, telegram_id: int, file_path: str) -> bool:
+        """Сохраняет фото и увеличивает счётчик"""
+        try:
             with self._connect() as conn:
-                rows = conn.execute(
-                    "SELECT id FROM profiles WHERE deleted_at IS NULL"
-                ).fetchall()
-            return [int(r[0]) for r in rows]
+                # Сначала получаем user_id по telegram_id
+                user_row = conn.execute(
+                    "SELECT id FROM users WHERE telegram_id = ?",
+                    (telegram_id,)
+                ).fetchone()
+                
+                if not user_row:
+                    logger.error(f"User with telegram_id {telegram_id} not found")
+                    return False
+                
+                user_id = user_row["id"]
+                
+                # Обновляем счётчик photo_count в profiles
+                cur = conn.execute(
+                    "UPDATE profiles SET photo_count = photo_count + 1 WHERE user_id = ?",
+                    (user_id,)
+                )
+                conn.commit()
+                
+                if cur.rowcount > 0:
+                    logger.info(f"Фото добавлено пользователю {telegram_id}")
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"save_photo error: {e}")
+            return False
+                
+    def get_all_active_profiles(self) -> list[int]:
+        """Нужен для Celery"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM profiles WHERE deleted_at IS NULL"
+            ).fetchall()
+        return [int(r[0]) for r in rows]
